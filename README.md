@@ -1,10 +1,10 @@
 # bitStock
 
-Aplicação web em português para gestão de estoque e acompanhamento de computadores em manutenção. Projeto de extensão voltado a uma loja de informática, com melhoria contínua Lean e capacitação da equipe. O escopo acadêmico está em [codex.md](codex.md).
+Gestão de estoque e ordens de serviço para uma loja de informática. Aplicação Next.js/TypeScript com Supabase Auth e PostgreSQL, preparada para publicação na Vercel. O contexto extensionista e o escopo estão em [codex.md](codex.md).
 
 ## Executar
 
-Requer Node.js 20.9 ou superior e npm.
+Requer Node.js 20.9 ou superior.
 
 ```bash
 npm ci
@@ -12,32 +12,49 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Abra http://localhost:3000. Sem credenciais Firebase, clique em **Explorar demonstração**. A demonstração contém dados fictícios e persiste neste navegador; não representa autenticação nem armazenamento da loja. Para reiniciá-la, remova apenas a chave `bitstock.demo.v1` do localStorage. Não use dados reais nessa modalidade.
+Abra http://localhost:3000. **Explorar demonstração** usa dados fictícios e salva apenas neste navegador. Não exige Supabase e não grava dados no banco da loja. Para reiniciar, remova somente a chave `bitstock.demo.v1` do localStorage.
 
-## Funcionalidades desta versão
+## Configurar Supabase
 
-- Painel com indicadores de estoque, validade e ordens de serviço, com acesso às listas filtradas.
-- Cadastro, edição, busca e arquivamento de produtos; código único incluindo produtos arquivados.
-- Entradas e saídas com saldo previsto, histórico preservado e bloqueio de saldo negativo.
-- Validade opcional, com alerta provisório de 30 dias, a validar com a loja; controle por lotes ainda não implementado.
-- Ordens de serviço com recebimento, mudanças de situação, entrega e histórico. Equipamentos de clientes não alteram o estoque de venda.
-- Interface responsiva, formulários acessíveis e feedback de erro/sucesso.
-- Login Firebase por e-mail/senha, autorização administrativa e API com transações e idempotência.
+1. Crie um projeto Supabase. No SQL Editor, execute [a migração inicial](supabase/migrations/202611030001_bitstock.sql), uma única vez, em um projeto novo.
+2. Copie a Project URL e a chave pública/publishable para `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` em `.env.local`. A chave pública legada `anon` também é compatível nesse campo.
+3. Configure `SUPABASE_SECRET_KEY` com a chave secreta do projeto (ou a chave legada `service_role`), exclusivamente no servidor. Nunca use prefixo `NEXT_PUBLIC`, publique essa chave ou a adicione ao Git.
+4. Em Authentication, habilite e-mail/senha e crie as contas iniciais pelo painel. Configure a Site URL com a URL da aplicação. Não há cadastro público na interface; desative novos cadastros no provedor após provisionar as contas.
+5. Autorize cada colaborador pelo SQL Editor, substituindo UID e nome:
 
-## Configurar acesso real
+```sql
+insert into public.staff (id, name, authorized)
+values ('UID_DA_CONTA', 'Nome do colaborador', true)
+on conflict (id) do update set name = excluded.name, authorized = true;
+```
 
-1. Crie um projeto Firebase e registre uma aplicação web. Preencha as variáveis `NEXT_PUBLIC_FIREBASE_*` de `.env.local` com sua configuração.
-2. Ative **Authentication → E-mail/senha** e crie administrativamente as contas iniciais. Não há cadastro público na interface. A autorização de acesso é independente da existência da conta.
-3. Crie um banco **Cloud Firestore**. Publique `firestore.rules` pelo console ou com Firebase CLI (`firebase deploy --only firestore:rules --project SEU_PROJECT_ID`). As regras bloqueiam todo acesso direto pelo cliente; a API é a única responsável pelas operações da loja.
-4. No console Firestore, crie `users/UID_DA_CONTA` com `authorized: true` (booleano) e `name: "Nome do colaborador"`. Para revogar acesso, altere `authorized` para `false`. Cada requisição verifica essa autorização e a validade/revogação do token.
-5. Gere uma chave de conta de serviço e preencha `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL` e `FIREBASE_PRIVATE_KEY` exclusivamente no servidor. A chave pode usar `\n` para quebras de linha. Nunca envie a chave para o GitHub ou use prefixo `NEXT_PUBLIC` nessas variáveis.
-6. Reinicie a aplicação. O ambiente real começa vazio; os exemplos da demonstração nunca são enviados ao Firestore.
+Para revogar o acesso à loja:
 
-As operações usam as coleções `products`, `movements`, `serviceOrders`, `users`, `operations` (recibos idempotentes) e `settings/revision`. Datas operacionais são geradas no servidor e exibidas em America/Sao_Paulo; valores monetários são inteiros em centavos. O histórico de situações fica dentro da ordem de serviço nesta versão.
+```sql
+update public.staff set authorized = false where id = 'UID_DA_CONTA';
+```
 
-**Decisão para o piloto:** uma transação lê os dados da loja e serializa alterações em `settings/revision`, validando códigos únicos e gravando apenas registros alterados. O recibo associa o UUID da solicitação ao usuário e conteúdo; repetir a mesma solicitação não duplica a movimentação. Essa estratégia prioriza integridade e simplicidade em uma loja pequena, mas carrega todo o histórico em memória. Antes de crescer, implementar paginação, transações específicas por produto, índice `productCodes` e histórico de ordens em subcoleção. Ainda não há atualização em tempo real: recarregue para consultar alterações feitas por outro usuário.
+Todos os colaboradores autorizados possuem as mesmas permissões nesta versão. A existência da conta de autenticação não concede acesso à loja. Dados reais começam vazios; os exemplos da demonstração não são enviados ao Supabase.
 
-## Verificação
+## Integridade e arquitetura
+
+- A API verifica o token com `auth.getUser(token)` e consulta a autorização em `staff`.
+- Todas as tabelas têm RLS. `anon` e `authenticated` não recebem acesso direto às tabelas nem às funções de persistência. O cliente não consegue editar saldos, históricos ou permissões pela API pública do Supabase.
+- Somente a API Next.js, com chave secreta, chama `bitstock_snapshot` e `bitstock_commit`. Essas funções também verificam o usuário autorizado.
+- Produtos, movimentações, ordens e eventos ficam em tabelas relacionadas, com chaves estrangeiras e restrições de integridade. Códigos normalizados são únicos, inclusive para produtos arquivados; o saldo não pode ser negativo.
+- A gravação bloqueia a revisão compartilhada, verifica o recibo da operação e compara a revisão lida. Em conflito, a API relê e revalida o comando, com limite de tentativas. Saldo, histórico e recibo são persistidos na mesma transação.
+- Repetir uma solicitação com o mesmo UUID e conteúdo não duplica a operação. Reutilizar o UUID para outro conteúdo é rejeitado.
+- Valores monetários são centavos inteiros e datas de operações são geradas no servidor. Exibição em português do Brasil e fuso America/Sao_Paulo.
+
+**Limite do piloto:** a API lê o histórico completo e envia o estado validado à função transacional. Isso é simples para uma loja pequena, mas precisa evoluir para paginação e comandos específicos por produto antes de crescer. A interface atualiza ao recarregar ou concluir uma operação; não há sincronização em tempo real.
+
+## Funcionalidades
+
+Painel de indicadores; cadastro, edição e arquivamento de produtos; entradas/saídas com saldo previsto e histórico; alertas de validade; ordens de serviço com recebimento, situação, entrega e linha do tempo; interface adaptada para computador e celular.
+
+O alerta de validade usa provisoriamente 30 dias, a validar com a loja. Controle por lotes não foi implementado. Equipamentos de clientes ficam separados do estoque de venda. Não inclui caixa, pagamentos, emissão fiscal ou pedidos de venda.
+
+## Testes
 
 ```bash
 npm run typecheck
@@ -47,20 +64,25 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Os testes de domínio verificam validação de dados, saldo, unicidade, imutabilidade e separação das ordens. Os testes de navegador cobrem os fluxos de demonstração em computador e celular e a rejeição de requisições anônimas à API. A verificação de Firebase autenticado, concorrência e repetição de requisições no banco real depende de um projeto de teste configurado; não considerar esses critérios validados somente pelos testes locais.
+Os testes de domínio verificam validações e regras de estoque. O teste de banco executa a migração em PostgreSQL local (PGlite), verificando autorização, RLS/privilégios, códigos únicos, saldo negativo, conflito de revisão, idempotência e histórico de ordens. Os testes Playwright cobrem os fluxos da demonstração em computador e celular e a rejeição de chamadas anônimas à API.
 
-## Publicar
+A verificação em PGlite não substitui login e operações no projeto Supabase real. Esses testes devem ser feitos após provisionar o projeto e suas credenciais, incluindo concorrência entre sessões independentes e repetição da mesma solicitação.
 
-Use uma hospedagem com suporte a servidor Node.js e Next.js (a API usa Firebase Admin e não funciona em exportação HTML estática).
+## Publicar na Vercel
+
+Importe o repositório `Matheus-Ribeir0/bitStock` como projeto Next.js, usando a raiz do repositório. Configure as três variáveis de `.env.example` no ambiente **Production**. A chave secreta deve ser armazenada como variável secreta, nunca exposta ao navegador. `NEXT_PUBLIC_*` precisam estar disponíveis durante o build.
+
+Use outro projeto Supabase para Preview/Development quando houver dados reais em produção. Não forneça credenciais de produção a previews de contribuições não revisadas.
+
+A Vercel compila com `npm run build`. Configure a URL de produção no Supabase Auth. Localmente, a versão compilada pode ser iniciada com:
 
 ```bash
-npm ci
 npm run build
 npm start
 ```
 
-Configure todas as variáveis no ambiente de hospedagem, habilite HTTPS e inclua o domínio nos domínios autorizados do Firebase Authentication. Variáveis `NEXT_PUBLIC_*` precisam estar disponíveis durante o build. Confira os limites gratuitos dos serviços antes de publicar; não foi contratado nenhum plano pago. A hospedagem e o projeto Firebase reais ainda precisam ser definidos.
+O plano Hobby da Vercel é restrito a uso pessoal não comercial; a operação comercial da loja exige plano/hospedagem compatível. Supabase Free possui limites e pode pausar por inatividade. Nenhum plano pago deve ser contratado automaticamente.
 
-## Próximas etapas com a loja
+## Atividades extensionistas
 
-Validar categorias, produtos sujeitos à validade e eventual necessidade de lotes; mapear gargalos antes da implantação; configurar e verificar o Firebase real; capacitar proprietários e atendentes preferencialmente à tarde; comparar tempos de consulta e registro antes/depois sem inventar resultados. Emissão fiscal, caixa, pagamentos, orçamentos e pedidos de venda ficam fora desta versão.
+Validar categorias e validades com a loja; mapear desperdícios Lean; capacitar proprietários e atendentes preferencialmente à tarde; medir tempos antes/depois da implantação sem inventar resultados. A configuração do projeto remoto e o teste autenticado são condições para uso real.

@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "node:crypto";
-import { adminServices } from "@/lib/firebase-admin";
+import { serverClient } from "@/lib/supabase-server";
 import { applyCommand } from "@/lib/domain";
 import type { Store, Command } from "@/lib/types";
-import type { Firestore, Transaction } from "firebase-admin/firestore";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 class ApiError extends Error {
@@ -18,41 +17,30 @@ async function authorize(req: NextRequest) {
   const token = req.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1];
   if (!token)
     throw new ApiError("Entre com uma conta autorizada para continuar.", 401);
-  const services = adminServices();
-  let identity;
-  try {
-    identity = await services.auth.verifyIdToken(token, true);
-  } catch {
+  const client = serverClient();
+  const { data, error } = await client.auth.getUser(token);
+  if (error || !data.user)
     throw new ApiError("Sua sessão expirou. Entre novamente.", 401);
-  }
-  const allowed = await services.db.doc(`users/${identity.uid}`).get();
-  if (!allowed.exists || allowed.data()?.authorized !== true)
-    throw new ApiError("Esta conta não tem acesso à loja.", 403);
-  return {
-    ...services,
-    uid: identity.uid,
-    name: String(
-      allowed.data()?.name || identity.name || identity.email || "Colaborador",
-    ),
-  };
+  return { client, uid: data.user.id };
 }
-async function readStore(db: Firestore, tx: Transaction): Promise<Store> {
-  const snapshots = await Promise.all(
-    ["products", "movements", "serviceOrders"].map((name) =>
-      tx.get(db.collection(name)),
-    ),
-  );
-  return {
-    products: snapshots[0].docs.map((d) => d.data()),
-    movements: snapshots[1].docs.map((d) => d.data()),
-    orders: snapshots[2].docs.map((d) => d.data()),
-  } as Store;
+type Snapshot = { store: Store; revision: number; name: string };
+async function snapshot(
+  client: ReturnType<typeof serverClient>,
+  uid: string,
+): Promise<Snapshot> {
+  const { data, error } = await client.rpc("bitstock_snapshot", { p_uid: uid });
+  if (error) {
+    if (error.message.includes("NOT_AUTHORIZED"))
+      throw new ApiError("Esta conta não tem acesso à loja.", 403);
+    throw error;
+  }
+  return data as Snapshot;
 }
 function responseError(error: unknown) {
   if (error instanceof ApiError)
     return NextResponse.json(
       { error: error.message },
-      { status: error.status },
+      { status: error.status, headers: { "Cache-Control": "no-store" } },
     );
   if (error instanceof SyntaxError)
     return NextResponse.json(
@@ -61,20 +49,20 @@ function responseError(error: unknown) {
     );
   console.error(
     "bitStock API:",
-    error instanceof Error ? error.message : "Falha desconhecida",
+    error instanceof Error ? error.message : "Falha na persistência",
   );
   return NextResponse.json(
     {
       error:
-        "Não foi possível acessar os dados da loja. Confira a configuração e tente novamente.",
+        "Não foi possível acessar os dados da loja. Tente novamente ou confira a configuração.",
     },
     { status: 503 },
   );
 }
 export async function GET(req: NextRequest) {
   try {
-    const { db, name } = await authorize(req);
-    const store = await db.runTransaction((tx) => readStore(db, tx));
+    const { client, uid } = await authorize(req);
+    const { store, name } = await snapshot(client, uid);
     return NextResponse.json(
       { store, name },
       { headers: { "Cache-Control": "no-store" } },
@@ -85,43 +73,55 @@ export async function GET(req: NextRequest) {
 }
 export async function POST(req: NextRequest) {
   try {
-    const { db, uid, name } = await authorize(req);
+    const { client, uid } = await authorize(req);
     const raw = await req.text();
     if (raw.length > 16000)
       throw new ApiError("Solicitação muito grande.", 413);
-    const { command, operationId } = JSON.parse(raw);
+    const body: unknown = JSON.parse(raw);
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      throw new ApiError("Solicitação inválida.", 400);
+    const { command, operationId } = body as {
+      command: Command;
+      operationId: string;
+    };
     if (
       typeof operationId !== "string" ||
-      !/^[0-9a-f-]{36}$/i.test(operationId)
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        operationId,
+      )
     )
       throw new ApiError("Identificador de operação inválido.", 400);
     const fingerprint = createHash("sha256")
       .update(JSON.stringify({ uid, command }))
       .digest("hex");
-    const now = new Date().toISOString();
-    const store = await db.runTransaction(async (tx) => {
-      const receipt = db.doc(`operations/${operationId}`);
-      const revision = db.doc("settings/revision");
-      const [previous, version] = await Promise.all([
-        tx.get(receipt),
-        tx.get(revision),
-      ]);
-      const current = await readStore(db, tx);
-      if (previous.exists) {
-        if (previous.data()?.fingerprint !== fingerprint)
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const current = await snapshot(client, uid);
+      // Requisições já concluídas são verificadas antes de reaplicar o comando.
+      const { data: receipt, error: receiptError } = await client
+        .from("operation_receipts")
+        .select("fingerprint")
+        .eq("id", operationId)
+        .maybeSingle();
+      if (receiptError) throw receiptError;
+      if (receipt) {
+        if (receipt.fingerprint !== fingerprint)
           throw new ApiError(
             "Identificador já utilizado em outra operação.",
             409,
           );
-        return current;
+        const latest = await snapshot(client, uid);
+        return NextResponse.json(
+          { store: latest.store },
+          { headers: { "Cache-Control": "no-store" } },
+        );
       }
       let next: Store;
       try {
         next = applyCommand(
-          current,
-          command as Command,
-          name,
-          now,
+          current.store,
+          command,
+          current.name,
+          new Date().toISOString(),
           operationId,
         );
       } catch (error) {
@@ -130,28 +130,33 @@ export async function POST(req: NextRequest) {
           400,
         );
       }
-      for (const [key, collection] of [
-        ["products", "products"],
-        ["movements", "movements"],
-        ["orders", "serviceOrders"],
-      ] as const) {
-        const old = new Map(
-          current[key].map((item) => [item.id, JSON.stringify(item)]),
-        );
-        for (const item of next[key])
-          if (old.get(item.id) !== JSON.stringify(item))
-            tx.set(db.doc(`${collection}/${item.id}`), item);
-      }
-      tx.set(revision, {
-        version: Number(version.data()?.version || 0) + 1,
-        updatedAt: now,
+      const { data, error } = await client.rpc("bitstock_commit", {
+        p_uid: uid,
+        p_operation: operationId,
+        p_fingerprint: fingerprint,
+        p_revision: current.revision,
+        p_store: next,
       });
-      tx.set(receipt, { fingerprint, uid, createdAt: now });
-      return next;
-    });
-    return NextResponse.json(
-      { store },
-      { headers: { "Cache-Control": "no-store" } },
+      if (error) {
+        if (error.message.includes("NOT_AUTHORIZED"))
+          throw new ApiError("Esta conta não tem acesso à loja.", 403);
+        if (error.message.includes("OPERATION_CONFLICT"))
+          throw new ApiError(
+            "Identificador já utilizado em outra operação.",
+            409,
+          );
+        throw error;
+      }
+      if (data === "retry") continue;
+      const latest = await snapshot(client, uid);
+      return NextResponse.json(
+        { store: latest.store },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    throw new ApiError(
+      "O estoque foi atualizado por outro usuário. Tente novamente.",
+      409,
     );
   } catch (error) {
     return responseError(error);

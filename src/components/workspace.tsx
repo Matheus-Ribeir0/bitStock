@@ -1,11 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import {
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut,
-  type User,
-} from "firebase/auth";
+import type { User } from "@supabase/supabase-js";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -27,7 +22,11 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { clientAuth, firebaseConfigured } from "@/lib/firebase-client";
+import {
+  clientAuth,
+  supabaseConfigured,
+  accessToken,
+} from "@/lib/supabase-client";
 import { applyCommand, demoStore, emptyStore, expiryInfo } from "@/lib/domain";
 import {
   categories,
@@ -40,7 +39,7 @@ import {
 import { Badge, currency, date, Empty, Modal } from "./ui";
 import { MovementForm, OrderForm, ProductForm, type Save } from "./forms";
 type View = "overview" | "products" | "movements" | "orders";
-type Session = { mode: "demo" } | { mode: "firebase"; user: User };
+type Session = { mode: "demo" } | { mode: "supabase"; user: User };
 type Dialog =
   | { kind: "product"; product?: Product }
   | { kind: "movement"; type: "entrada" | "saida"; productId?: string }
@@ -144,14 +143,14 @@ function Login({
               setPending(true);
               setError("");
               try {
-                await signInWithEmailAndPassword(
-                  clientAuth(),
-                  String(f.get("email")),
-                  String(f.get("password")),
-                );
+                const { error } = await clientAuth().signInWithPassword({
+                  email: String(f.get("email")),
+                  password: String(f.get("password")),
+                });
+                if (error) throw error;
               } catch {
                 setError(
-                  firebaseConfigured
+                  supabaseConfigured
                     ? "Não foi possível entrar. Confira seu e-mail e senha e tente novamente."
                     : "O acesso da loja ainda não está configurado. Use a demonstração para conhecer o sistema.",
                 );
@@ -225,11 +224,11 @@ export function Workspace() {
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const saving = useRef(false);
-  async function load(user: User) {
+  async function load() {
     setLoading(true);
     setError("");
     try {
-      const token = await user.getIdToken();
+      const token = await accessToken();
       const res = await fetch("/api/store", {
         headers: { Authorization: `Bearer ${token}` },
         cache: "no-store",
@@ -249,16 +248,38 @@ export function Workspace() {
     }
   }
   useEffect(() => {
-    if (!firebaseConfigured) {
+    if (!supabaseConfigured) {
       setReady(true);
       return;
     }
-    return onAuthStateChanged(clientAuth(), (user) => {
-      setSession(user ? { mode: "firebase", user } : null);
+    let active = true;
+    let lastUid: string | null | undefined;
+    const update = (user: User | null) => {
+      if (!active) return;
+      if (lastUid === (user?.id ?? null)) return;
+      lastUid = user?.id ?? null;
+      setSession(user ? { mode: "supabase", user } : null);
       setStore(emptyStore());
       setReady(true);
-      if (user) void load(user);
+      if (user) void load();
+    };
+    // Não aguardar chamadas do SDK dentro do callback síncrono de autenticação.
+    const {
+      data: { subscription },
+    } = clientAuth().onAuthStateChange((_event, current) => {
+      setTimeout(() => update(current?.user ?? null), 0);
     });
+    clientAuth()
+      .getSession()
+      .then(({ data, error }) => {
+        if (error && active)
+          setError("Não foi possível recuperar sua sessão. Entre novamente.");
+        update(data.session?.user ?? null);
+      });
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
   }, []);
   useEffect(() => {
     if (!toast) return;
@@ -286,9 +307,10 @@ export function Workspace() {
     }
   }
   async function logout() {
-    if (session?.mode === "firebase") {
+    if (session?.mode === "supabase") {
       try {
-        await signOut(clientAuth());
+        const { error } = await clientAuth().signOut();
+        if (error) throw error;
       } catch {
         setToast("Não foi possível sair. Tente novamente.");
         return;
@@ -323,7 +345,7 @@ export function Workspace() {
         if (navigator.locks) await navigator.locks.request(DEMO_KEY, execute);
         else execute();
       } else {
-        const token = await session.user.getIdToken();
+        const token = await accessToken();
         const res = await fetch("/api/store", {
           method: "POST",
           headers: {
@@ -566,9 +588,7 @@ export function Workspace() {
               <p>{error}</p>
               <button
                 className="button secondary"
-                onClick={() =>
-                  session.mode === "firebase" && void load(session.user)
-                }
+                onClick={() => session.mode === "supabase" && void load()}
               >
                 Tentar novamente
               </button>

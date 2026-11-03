@@ -51,7 +51,7 @@ Problemas que a aplicação deve ajudar a resolver:
 
 ### 1. Acesso ao sistema
 
-- Login com e-mail e senha usando Firebase Authentication.
+- Login com e-mail e senha usando Supabase Auth.
 - Apenas usuários previamente autorizados podem acessar os dados da loja.
 - Não oferecer cadastro público na primeira versão.
 - Criar as contas iniciais administrativamente. Considerar os usuários autorizados com as mesmas permissões no MVP.
@@ -138,36 +138,41 @@ Só adicionar esses recursos se houver necessidade confirmada após a entrega do
 ## Stack e organização
 
 - **Next.js com TypeScript:** aplicação web usando App Router.
-- **Firebase Authentication:** autenticação por e-mail e senha.
-- **Cloud Firestore:** persistência de produtos, usuários autorizados e movimentações.
+- **Supabase Auth:** autenticação por e-mail e senha.
+- **Supabase PostgreSQL:** persistência de produtos, usuários autorizados e movimentações.
 - **Estilização:** escolher uma solução simples e manter consistência visual; evitar adicionar bibliotecas sem necessidade.
-- **Publicação:** escolher uma hospedagem compatível com a arquitetura final do Next.js, considerando facilidade de configuração e uso gratuito. A hospedagem ainda não está definida. Verificar os limites gratuitos dos serviços antes da adoção e não contratar recursos pagos sem autorização.
+- **Publicação:** escolher uma hospedagem compatível com a arquitetura final do Next.js, considerando facilidade de configuração e uso gratuito. A hospedagem escolhida é a Vercel; validar a adequação do plano antes do uso comercial. Verificar os limites gratuitos dos serviços antes da adoção e não contratar recursos pagos sem autorização.
 
-Preferir uma única aplicação, sem backend separado no início. Organizar telas, componentes, validações e acesso ao Firebase em módulos pequenos. Não adicionar camadas ou abstrações para necessidades futuras.
+Preferir uma única aplicação, sem backend separado no início. Organizar telas, componentes, validações e acesso ao Supabase em módulos pequenos. Não adicionar camadas ou abstrações para necessidades futuras.
 
 O estoque pertence à loja, e não à conta individual de quem cadastrou o produto. Todos os usuários autorizados acessam os mesmos dados.
 
 ## Modelo de dados inicial
 
-- `users/{uid}`: nome de exibição e indicador de acesso autorizado. Provisionamento administrativo; o usuário não pode conceder acesso a si mesmo.
-- `products/{productId}`: dados cadastrais, saldo atual e datas.
-- `productCodes/{normalizedCode}`: referência ao produto, para reservar o código e garantir unicidade em uma transação. Definir uma normalização consistente antes de implementar.
-- `movements/{movementId}`: produto, nome e código no momento do registro, tipo de entrada/saída, quantidade, saldo anterior, saldo resultante, motivo, observação opcional, usuário e data.
-- `serviceOrders/{serviceOrderId}`: número único, identificação do equipamento, problema relatado, situação, datas de recebimento e entrega e usuário responsável.
-- `serviceOrders/{serviceOrderId}/events/{eventId}`: histórico de mudanças de situação, com situação anterior, nova situação, usuário e data.
+Usar PostgreSQL no Supabase, com uma loja por projeto:
 
-Usar timestamps do servidor. Armazenar valores monetários como inteiros em centavos e apresentá-los em reais. Não apagar documentos de produto usados no histórico.
+- `staff`: referência a `auth.users`, nome e indicador `authorized`, administrado fora da interface pública.
+- `products`: dados cadastrais, saldo, estoque mínimo, validade opcional e índice único do código normalizado.
+- `stock_movements`: entradas/saídas, produto, nome e código históricos, quantidade, saldo anterior/resultante, motivo, responsável e data.
+- `service_orders`: número único, equipamento, problema, situação, recebimento, entrega e responsável.
+- `service_order_events`: histórico ordenado das situações de cada ordem.
+- `operation_receipts`: identificador, usuário e impressão digital de cada solicitação, para impedir duplicação.
+- `app_state`: revisão do estado compartilhado da loja para controle de concorrência no piloto.
+
+Valores monetários são inteiros em centavos. Datas operacionais são geradas no servidor e persistidas como `timestamptz`; a validade usa a data civil do produto. Não apagar produtos usados no histórico.
 
 ## Integridade e segurança
 
-- Validar campos obrigatórios, limites e valores tanto na interface quanto na camada que autoriza a gravação.
-- Proteger os dados com regras do Firestore; esconder telas ou botões não é controle de acesso.
-- Verificar autenticação e autorização em qualquer operação executada no servidor.
-- Não publicar regras de teste que liberem leitura ou escrita para qualquer pessoa.
-- Antes de implementar movimentações, definir onde a transação será executada. Se ocorrer no cliente, as regras precisam impedir alterações de saldo sem o histórico correspondente. Se ocorrer no servidor, bloquear essas gravações diretas pelo cliente.
-- Evitar gravações duplicadas por cliques repetidos; tratar também tentativas repetidas da mesma solicitação na operação de movimentação.
-- Manter segredos e credenciais administrativas fora do repositório. Documentar variáveis necessárias em `.env.example`, sem valores sensíveis.
-- Usar dados fictícios na demonstração acadêmica. Não coletar dados de clientes da loja no MVP.
+- A API Next.js valida o token com Supabase Auth e verifica `staff.authorized` a cada leitura/gravação.
+- Ativar Row Level Security (RLS) e bloquear acesso direto de `anon` e `authenticated` às tabelas e funções administrativas.
+- A chave secreta do Supabase fica exclusivamente no servidor, sem prefixo `NEXT_PUBLIC` e fora do Git.
+- Não oferecer cadastro público na interface. Desabilitar novos cadastros no provedor após provisionar as contas iniciais.
+- A autorização é independente da existência da conta; nenhum usuário pode conceder acesso a si mesmo.
+- Validar campos, quantidades, códigos e permissões no servidor; o banco reforça saldo não negativo, códigos únicos e referências entre registros.
+- Usar uma transação com revisão e recibo idempotente para atualizar saldo e histórico juntos. Em conflito de revisão, reler o estado e revalidar antes de repetir.
+- Preservar históricos. Correções de estoque usam uma nova movimentação justificada.
+- No piloto, a API lê o conjunto completo da loja. Antes de crescer, adicionar paginação e transações específicas por produto.
+- Usar dados fictícios na demonstração acadêmica e não coletar dados pessoais de clientes no MVP.
 
 ## Experiência de uso
 
@@ -183,7 +188,7 @@ Usar timestamps do servidor. Armazenar valores monetários como inteiros em cent
 ## Ordem sugerida de implementação
 
 1. Mapear os processos atuais com a equipe, preferencialmente à tarde, identificar desperdícios Lean e validar os fluxos de estoque, validade e manutenção.
-2. Preparar Next.js, TypeScript, configuração local do Firebase e `.env.example`.
+2. Preparar Next.js, TypeScript, configuração local do Supabase e `.env.example`.
 3. Implementar login, autorização dos usuários e proteção dos dados.
 4. Criar cadastro, edição, listagem e busca de produtos.
 5. Implementar movimentações atômicas, prevenção de duplicidade e histórico.
