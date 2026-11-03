@@ -1,0 +1,8 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // A API valida o ID token e users/{uid}.authorized usando o Admin SDK.
+    // Clientes não podem conceder acesso nem alterar saldos ou históricos.
+    match /{document=**} { allow read, write: if false; }
+  }
+}
