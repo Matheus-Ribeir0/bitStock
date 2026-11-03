@@ -36,6 +36,26 @@ update public.staff set authorized = false where id = 'UID_DA_CONTA';
 
 Todos os colaboradores autorizados possuem as mesmas permissões nesta versão. A existência da conta de autenticação não concede acesso à loja. Dados reais começam vazios; os exemplos da demonstração não são enviados ao Supabase.
 
+Também é possível aplicar a configuração pelo terminal autenticado, sem usar o SQL Editor:
+
+```bash
+npx supabase login
+npx supabase link SEU_PROJECT_REF
+npx supabase db push --remote=SEU_PROJECT_REF --skip-vault
+npx supabase config diff --remote=SEU_PROJECT_REF
+npx supabase config push --remote=SEU_PROJECT_REF
+```
+
+O `supabase/config.toml` declara a URL desta instalação e desativa cadastros públicos. Ajuste a URL antes de usar em outra instalação. Revise o diff antes do push; propriedades não declaradas permanecem inalteradas.
+
+Para definir ou redefinir a senha de uma conta já criada e autorizada, com as credenciais de servidor em `.env.local`, execute localmente em um terminal:
+
+```bash
+npm run admin:password -- seu@email.com
+```
+
+O comando solicita a senha oculta e sua confirmação, exige pelo menos 12 caracteres e verifica o login. Não envie a senha pelo chat nem passe a senha como argumento. A chave de servidor e esse procedimento são exclusivos do responsável pela instalação.
+
 ## Integridade e arquitetura
 
 - A API verifica o token com `auth.getUser(token)` e consulta a autorização em `staff`.

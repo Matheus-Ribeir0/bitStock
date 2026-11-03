@@ -1,0 +1,5 @@
+project_id = "bitstock"
+
+[auth]
+site_url = "https://bitstock-rho.vercel.app"
+enable_signup = false
